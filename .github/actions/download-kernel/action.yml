@@ -30,56 +30,156 @@ runs:
       run: |
         set -euo pipefail
 
-        # Derive android and kernel from combined version when available
         VERSION="${{ inputs.version }}"
-        ANDROID_PART=$(echo "$VERSION" | cut -d- -f1)
-        KERNEL_PART=$(echo "$VERSION" | cut -d- -f2)
+        ANDROID_PART="${VERSION%%-*}"
+        KERNEL_PART="${VERSION#*-}"
         FORMATTED_BRANCH="${ANDROID_PART}-${KERNEL_PART}-${{ inputs.os_patch_level }}"
 
-        init_repo() {
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-${FORMATTED_BRANCH} --depth=1 || { echo "ERROR: repo init failed" >&2; return 1; }
-          REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH}) || { echo "ERROR: git ls-remote failed" >&2; return 1; }
-          DEFAULT_MANIFEST_PATH=.repo/manifests/default.xml
-          DEPRECATED=false
-          if grep -q deprecated <<< "$REMOTE_BRANCH"; then
-            sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" "$DEFAULT_MANIFEST_PATH"
-            echo "⚠ Note: Branch ${FORMATTED_BRANCH} is considered deprecated."
-            DEPRECATED=true
+        COMMON_REPO_URL="https://android.googlesource.com/kernel/common"
+        COMMON_REF="refs/heads/${FORMATTED_BRANCH}"
+        MANIFEST_BRANCH="common-${FORMATTED_BRANCH}"
+        DEPRECATED=false
+        EXPECTED_COMMON_SHA=""
+
+        resolve_branch() {
+          EXPECTED_COMMON_SHA="$(git ls-remote "$COMMON_REPO_URL" "$COMMON_REF" | awk 'NR == 1 {print $1}')"
+
+          if [[ -n "$EXPECTED_COMMON_SHA" ]]; then
+            return 0
           fi
-          echo "deprecated=$DEPRECATED" >> $GITHUB_OUTPUT
+
+          COMMON_REF="refs/heads/deprecated/${FORMATTED_BRANCH}"
+          MANIFEST_BRANCH="deprecated/common-${FORMATTED_BRANCH}"
+          EXPECTED_COMMON_SHA="$(git ls-remote "$COMMON_REPO_URL" "$COMMON_REF" | awk 'NR == 1 {print $1}')"
+
+          if [[ -z "$EXPECTED_COMMON_SHA" ]]; then
+            echo "ERROR: kernel/common branch not found: ${FORMATTED_BRANCH}" >&2
+            echo "ERROR: checked both normal and deprecated refs." >&2
+            return 1
+          fi
+
+          DEPRECATED=true
+          echo "⚠ Note: Branch ${FORMATTED_BRANCH} is considered deprecated."
         }
 
-        init_repo || { echo "ERROR: init_repo failed" >&2; exit 1; }
+        init_repo() {
+          repo init \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b "$MANIFEST_BRANCH" \
+            --no-use-superproject \
+            --depth=1 || {
+              echo "ERROR: repo init failed for ${MANIFEST_BRANCH}" >&2
+              return 1
+            }
+        }
+
+        validate_or_repair_common() {
+          local actual_sha=""
+
+          if [[ -d common/.git || -f common/.git ]]; then
+            actual_sha="$(git -C common rev-parse HEAD 2>/dev/null || true)"
+          fi
+
+          if [[ "$actual_sha" != "$EXPECTED_COMMON_SHA" ]] || \
+             [[ ! -f common/Makefile ]] || \
+             [[ ! -d common/drivers ]] || \
+             [[ ! -d common/tools ]]; then
+            echo "::warning::kernel/common was synced at an invalid or incomplete revision. Repairing checkout."
+            echo "Expected common commit: $EXPECTED_COMMON_SHA"
+            echo "Current common commit:  ${actual_sha:-missing}"
+
+            if [[ ! -d common/.git && ! -f common/.git ]]; then
+              echo "ERROR: kernel/common is not a Git checkout after repo sync." >&2
+              return 1
+            fi
+
+            git -C common fetch \
+              --force \
+              --no-tags \
+              --depth=1 \
+              "$COMMON_REPO_URL" \
+              "$COMMON_REF"
+            EXPECTED_COMMON_SHA="$(git -C common rev-parse FETCH_HEAD)"
+            git -C common checkout --force --detach FETCH_HEAD
+            git -C common reset --hard FETCH_HEAD
+            git -C common clean -fdx
+          fi
+
+          actual_sha="$(git -C common rev-parse HEAD 2>/dev/null || true)"
+          if [[ "$actual_sha" != "$EXPECTED_COMMON_SHA" ]]; then
+            echo "ERROR: kernel/common is still at the wrong commit after repair." >&2
+            echo "Expected: $EXPECTED_COMMON_SHA" >&2
+            echo "Actual:   ${actual_sha:-missing}" >&2
+            return 1
+          fi
+
+          local required_paths=(
+            "Makefile"
+            "drivers"
+            "fs"
+            "include"
+            "tools"
+            "tools/bpf/resolve_btfids/Makefile"
+          )
+          local required_path
+          for required_path in "${required_paths[@]}"; do
+            if [[ ! -e "common/$required_path" ]]; then
+              echo "ERROR: required kernel path is missing: common/$required_path" >&2
+              return 1
+            fi
+          done
+
+          echo "kernel/common checkout validated: $actual_sha"
+        }
+
+        resolve_branch || exit 1
+        echo "deprecated=$DEPRECATED" >> "$GITHUB_OUTPUT"
+        echo "Manifest branch: $MANIFEST_BRANCH"
+        echo "Kernel common ref: $COMMON_REF"
+        echo "Expected common commit: $EXPECTED_COMMON_SHA"
+
+        init_repo || exit 1
 
         MAX_RETRIES=3
         RETRY_DELAY_SHORT=15
         SYNC_TIMEOUT="15m"
         attempt=1
 
-        while [ $attempt -le $MAX_RETRIES ]; do
+        while [[ $attempt -le $MAX_RETRIES ]]; do
           echo "Attempt $attempt/$MAX_RETRIES: repo sync (timeout $SYNC_TIMEOUT)..."
-          # Use minimal-shallow variant: current-branch, shallow init done above, reduce files downloaded
-          if timeout $SYNC_TIMEOUT repo sync -c --current-branch --no-clone-bundle --no-tags --jobs-checkout=4 -j4; then
+
+          if timeout "$SYNC_TIMEOUT" repo sync \
+            -c \
+            --current-branch \
+            --no-clone-bundle \
+            --no-tags \
+            --jobs-checkout=4 \
+            -j4; then
             echo "repo sync succeeded on attempt $attempt."
             break
+          else
+            rc=$?
           fi
-          rc=$?
-          if [ $rc -eq 124 ]; then
+
+          if [[ $rc -eq 124 ]]; then
             echo "repo sync timed out after $SYNC_TIMEOUT."
           else
             echo "repo sync failed with exit code $rc."
           fi
-          if [ $attempt -lt $MAX_RETRIES ]; then
-            echo "Cleaning workspace and retrying after ${RETRY_DELAY_SHORT}s..."
-            rm -rf .repo || true
-            sleep $RETRY_DELAY_SHORT
-            init_repo
-          else
+
+          if [[ $attempt -ge $MAX_RETRIES ]]; then
             echo "All $MAX_RETRIES attempts failed." >&2
-            exit $rc
+            exit "$rc"
           fi
-          attempt=$((attempt+1))
+
+          echo "Cleaning repo metadata and retrying after ${RETRY_DELAY_SHORT}s..."
+          rm -rf .repo
+          sleep "$RETRY_DELAY_SHORT"
+          init_repo || exit 1
+          attempt=$((attempt + 1))
         done
+
+        validate_or_repair_common
 
     # --- Non-repo steps (commented out; we only use repo now) ---
     # - name: Download manifest.xml for branch (with deprecated fallback)
@@ -141,3 +241,4 @@ runs:
 
         echo "Kernel common commit date: $COMMIT_DATE"
         echo "Kernel common commit msg: $COMMIT_MSG"
+        
