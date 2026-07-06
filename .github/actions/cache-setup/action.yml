@@ -126,10 +126,10 @@ runs:
         mkdir -p "$LDCACHE_DIR"
           
         # Create LD wrapper for thin-LTO caching
-        cat > "${{ github.workspace }}/kernel/common/ld-wrapper" << 'EOF'
-#!/bin/bash
-ld.lld "$@" --thinlto-cache-dir="$LDCACHE_DIR" --thinlto-jobs="$(nproc --all)"
-EOF
+        printf '%s\n' \
+          '#!/bin/bash' \
+          'ld.lld "$@" --thinlto-cache-dir="$LDCACHE_DIR" --thinlto-jobs="$(nproc --all)"' \
+          > "${{ github.workspace }}/kernel/common/ld-wrapper"
         chmod +x "${{ github.workspace }}/kernel/common/ld-wrapper"
 
         # Set size limit via environment (4GB)
