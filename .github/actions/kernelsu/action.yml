@@ -11,7 +11,7 @@ runs:
   steps:
     - name: Download Wild KSU
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel
+      working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
 
@@ -47,7 +47,7 @@ runs:
     - name: Extract KSU Version Info
       id: ksu-version
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+      working-directory: ${{ github.workspace }}/kernel/common/KernelSU-Next
       run: |
         # Fetch dev branch for version info (tags, commits, etc.)
         git fetch --depth=50 origin dev 2>/dev/null || true
@@ -64,10 +64,10 @@ runs:
 
     - name: 'Fix KernelSU-Next'
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+      working-directory: ${{ github.workspace }}/kernel/common/KernelSU-Next
       run: |
         set -euo pipefail
-        cp ${{ github.action_path }}/patches/static.patch "${{ github.workspace }}/kernel/KernelSU-Next/static.patch"
+        cp ${{ github.action_path }}/patches/static.patch "${{ github.workspace }}/kernel/common/KernelSU-Next/static.patch"
         patch -p1 < static.patch
 
     - name: Enable Kernel Configs
