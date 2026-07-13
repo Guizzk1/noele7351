@@ -19,6 +19,9 @@ outputs:
   deprecated_branch:
     description: 'Whether the branch is deprecated'
     value: ${{ steps.sync.outputs.deprecated }}
+  common_commit:
+    description: 'Android Common Kernel commit SHA'
+    value: ${{ steps.metadata.outputs.common_commit }}
 
 runs:
   using: composite
@@ -219,6 +222,7 @@ runs:
     #     python "${{ github.workspace }}/.github/actions/download-kernel/fast_parallel_download.py"
 
     - name: Capture Kernel Common Commit Metadata
+      id: metadata
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
@@ -231,14 +235,18 @@ runs:
 
         cd common
 
-        if [[ ! -d .git ]]; then
+        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
           echo "WARNING: common is not a git checkout; skipping commit metadata capture."
           exit 0
         fi
 
+        COMMIT_SHA=$(git rev-parse HEAD)
         COMMIT_DATE=$(git log -1 --format=%cI)
         COMMIT_MSG=$(git log -1 --format=%s)
 
+        echo "ANDROID_COMMON_COMMIT=$COMMIT_SHA" >> "$GITHUB_ENV"
+        echo "common_commit=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+        echo "Kernel common commit: $COMMIT_SHA"
         echo "Kernel common commit date: $COMMIT_DATE"
         echo "Kernel common commit msg: $COMMIT_MSG"
         

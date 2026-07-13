@@ -1,7 +1,8 @@
-name: Kernel Build Process
+name: ZenKernel Build Process
+
 permissions:
-  contents: write
-  actions: write
+  contents: read
+  actions: read
 
 on:
   workflow_call:
@@ -15,318 +16,334 @@ on:
       kernel_version:
         required: true
         type: string
-      sublevel:
-        required: true
-        type: string
       os_patch_level:
         required: true
         type: string
       variant:
-        required: false
+        required: true
         type: string
       feature_set:
         required: true
         type: string
-      ksu_branch:
-        required: false
-        type: string
-        default: ""
       susfs_commit:
         required: false
         type: string
         default: ""
+    outputs:
+      kernel_real:
+        value: ${{ jobs.build-gki.outputs.kernel_real }}
+      kernel_release:
+        value: ${{ jobs.build-gki.outputs.kernel_release }}
+      ksu_version:
+        value: ${{ jobs.build-gki.outputs.ksu_version }}
+      ksu_tag:
+        value: ${{ jobs.build-gki.outputs.ksu_tag }}
+      ksu_commit:
+        value: ${{ jobs.build-gki.outputs.ksu_commit }}
+      susfs_version:
+        value: ${{ jobs.build-gki.outputs.susfs_version }}
+      android_common_commit:
+        value: ${{ jobs.build-gki.outputs.android_common_commit }}
+      anykernel_commit:
+        value: ${{ jobs.build-gki.outputs.anykernel_commit }}
+      zip_name:
+        value: ${{ jobs.build-gki.outputs.zip_name }}
+      zip_sha256:
+        value: ${{ jobs.build-gki.outputs.zip_sha256 }}
+      artifact_name:
+        value: ${{ jobs.build-gki.outputs.artifact_name }}
+      rej_count:
+        value: ${{ jobs.build-gki.outputs.rej_count }}
 
 jobs:
   build-gki:
-    name: "${{ inputs.kernel_version }}.${{ inputs.sublevel }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }} (${{ inputs.variant }})"
+    name: Android 12 GKI 5.10 LTS (Normal)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      kernel_real: ${{ steps.metadata.outputs.kernel_real }}
+      kernel_release: ${{ steps.metadata.outputs.kernel_release }}
+      ksu_version: ${{ steps.metadata.outputs.ksu_version }}
+      ksu_tag: ${{ steps.metadata.outputs.ksu_tag }}
+      ksu_commit: ${{ steps.metadata.outputs.ksu_commit }}
+      susfs_version: ${{ steps.metadata.outputs.susfs_version }}
+      android_common_commit: ${{ steps.metadata.outputs.android_common_commit }}
+      anykernel_commit: ${{ steps.metadata.outputs.anykernel_commit }}
+      zip_name: ${{ steps.metadata.outputs.zip_name }}
+      zip_sha256: ${{ steps.metadata.outputs.zip_sha256 }}
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+      rej_count: ${{ steps.metadata.outputs.rej_count }}
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v5
 
-    - name: 🧹 Emergency Disk Cleanup
-      if: false
-      uses: ./.github/actions/disk-cleanup
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: rmz
+          rmz_version: "3.1.1"
+          testing: false
 
-    - name: Free Disk Space
-      if: true
-      uses: endersonmenezes/free-disk-space@v3  # Use @main for latest, @v3 for stable
-      with:
-        remove_android: true
-        remove_dotnet: true
-        remove_haskell: true
-        remove_tool_cache: true
-        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
-        remove_packages_one_command: true
-        remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
-        rm_cmd: "rmz"  # Use 'rmz' for faster deletion (default: 'rm')
-        rmz_version: "3.1.1"  # Required when rm_cmd is 'rmz'
-        testing: false
+      - name: Setup swap for LTO
+        uses: thejerrybao/setup-swap-space@v1
+        with:
+          swap-size-gb: 16
 
-    - name: Setup more Swap (for LTO)
-      uses: thejerrybao/setup-swap-space@v1   # or pierotofy/set-swap-space
-      with:
-        swap-size-gb: 16          # 10-24 GB is common for heavy LTO
-        # swap-space-path: /mnt/swapfile   # optional
+      - name: Setup build environment
+        id: build-environment
+        uses: ./.github/actions/setup-build-environment
 
-    - name: Setup Build Environment
-      uses: ./.github/actions/setup-build-environment
-      env:
-        BOOT_SIGN_KEY: ${{ secrets.BOOT_SIGN_KEY }}
-          
-    - name: Download Kernel Repository
-      uses: ./.github/actions/download-kernel
-      with:
-        version: ${{ inputs.version }}
-        android_version: ${{ inputs.android_version }}
-        kernel_version: ${{ inputs.kernel_version }}
-        os_patch_level: ${{ inputs.os_patch_level }}
+      - name: Download Android Common Kernel
+        id: kernel-source
+        uses: ./.github/actions/download-kernel
+        with:
+          version: ${{ inputs.version }}
+          android_version: ${{ inputs.android_version }}
+          kernel_version: ${{ inputs.kernel_version }}
+          os_patch_level: ${{ inputs.os_patch_level }}
 
-    - name: Set Build Timestamp from Kernel Commit
-      shell: bash
-      run: |
-        set -x
-        # Hardcode the build timestamp to the 5th day of the patch level
-        # at 04:20 UTC, using the existing timestamp formats expected by the build.
-        OS_PATCH_LEVEL_INPUT="${{ inputs.os_patch_level }}"
-        if [[ "$OS_PATCH_LEVEL_INPUT" == lts* ]]; then
-          if [[ "$OS_PATCH_LEVEL_INPUT" =~ ^lts-([0-9]{2})$ ]]; then
-            OS_PATCH_LEVEL_YM="$(date -u +%Y)-${BASH_REMATCH[1]}"
+      - name: Read real kernel version
+        id: kernel-version
+        uses: ./.github/actions/extract-sublevel-file-name
+
+      - name: Set build timestamp from kernel commit
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          build_timestamp="$(date -u -d "@$source_date_epoch" '+%a %b %d %H:%M:%S UTC %Y')"
+          git_date="$(date -u -d "@$source_date_epoch" '+%Y-%m-%dT%H:%M:%SZ')"
+
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
+          echo "KBUILD_BUILD_TIMESTAMP=$build_timestamp" >> "$GITHUB_ENV"
+          echo "GIT_COMMITTER_DATE=$git_date" >> "$GITHUB_ENV"
+          echo "GIT_AUTHOR_DATE=$git_date" >> "$GITHUB_ENV"
+          echo "Build timestamp: $build_timestamp"
+
+      # Compatibility fixes required for the Android Common Kernel toolchain.
+      # These do not add kernel features.
+      - name: Apply kernel build compatibility fixes
+        uses: ./.github/actions/kernel-fixes
+        with:
+          version: ${{ inputs.version }}
+          android_version: ${{ inputs.android_version }}
+          kernel_version: ${{ inputs.kernel_version }}
+          sublevel: ${{ steps.kernel-version.outputs.sublevel }}
+          os_patch_level: ${{ inputs.os_patch_level }}
+
+      - name: Setup latest KernelSU Next
+        uses: ./.github/actions/kernelsu
+
+      - name: Setup SUSFS
+        uses: ./.github/actions/susfs
+        with:
+          susfs_commit: ${{ inputs.susfs_commit }}
+          version: ${{ inputs.version }}
+          android_version: ${{ inputs.android_version }}
+          kernel_version: ${{ inputs.kernel_version }}
+          os_patch_level: ${{ inputs.os_patch_level }}
+          sublevel: ${{ steps.kernel-version.outputs.sublevel }}
+
+      - name: Clean generated kernel flags
+        uses: ./.github/actions/clean-kernel-flags
+
+      - name: Fail on patch rejects
+        id: rejects
+        if: ${{ always() }}
+        uses: ./.github/actions/scan-patch-rejects
+
+      - name: Setup build cache
+        continue-on-error: true
+        uses: ./.github/actions/cache-setup
+        with:
+          version: ${{ inputs.version }}
+          android_version: ${{ inputs.android_version }}
+          kernel_version: ${{ inputs.kernel_version }}
+          sublevel: ${{ steps.kernel-version.outputs.sublevel }}
+
+      - name: Restore ccache
+        id: restore-ccache
+        continue-on-error: true
+        uses: ./.github/actions/cache-restore
+        with:
+          cache_path: /home/runner/.ccache
+          cache_key: ${{ inputs.android_version }}-${{ steps.kernel-version.outputs.kernel_real }}-${{ inputs.os_patch_level }}
+          cache_bucket: ccache-cache
+          restore_keys: |
+            ${{ inputs.android_version }}-${{ steps.kernel-version.outputs.version }}.${{ steps.kernel-version.outputs.patchlevel }}-
+
+      - name: Restore ThinLTO cache
+        id: restore-lto
+        continue-on-error: true
+        uses: ./.github/actions/cache-restore
+        with:
+          cache_path: /home/runner/.ld_cache
+          cache_key: ${{ inputs.android_version }}-${{ steps.kernel-version.outputs.kernel_real }}-${{ inputs.os_patch_level }}
+          cache_bucket: lto-cache
+          restore_keys: |
+            ${{ inputs.android_version }}-${{ steps.kernel-version.outputs.version }}.${{ steps.kernel-version.outputs.patchlevel }}-
+
+      - name: Show cache status
+        shell: bash
+        run: |
+          echo "ccache: ${{ steps.restore-ccache.outputs.cache-hit || 'false' }}"
+          echo "ThinLTO: ${{ steps.restore-lto.outputs.cache-hit || 'false' }}"
+
+      - name: Initialize config fragment
+        run: touch "${{ github.workspace }}/wild_gki.fragment"
+
+      - name: Build normal Image
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+          KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
+        uses: ./.github/actions/build-kernel
+        with:
+          version: ${{ inputs.version }}
+
+      - name: Read compiled kernel release
+        id: kernel-release
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -euo pipefail
+
+          release_file="$(find /home/runner/out -type f \
+            -path '*/include/config/kernel.release' -print -quit)"
+
+          if [ -n "$release_file" ]; then
+            kernel_release="$(tr -d '\r\n' < "$release_file")"
+            echo "Kernel release source: $release_file"
           else
-            OS_PATCH_LEVEL_YM="$(date -u +%Y-%m)"
+            kernel_release="$(make -s \
+              O=/home/runner/out/common \
+              ARCH=arm64 \
+              kernelrelease)"
+            echo "Kernel release source: make kernelrelease"
           fi
-        else
-          OS_PATCH_LEVEL_YM="$OS_PATCH_LEVEL_INPUT"
-        fi
-        FIXED_BUILD_DATE="${OS_PATCH_LEVEL_YM}-05 04:20:00 UTC"
-        SOURCE_DATE_EPOCH=$(date -u -d "$FIXED_BUILD_DATE" +%s)
-        echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> $GITHUB_ENV
-        KBUILD_TS=$(date -u -d @${SOURCE_DATE_EPOCH} '+%a %b %d %H:%M:%S UTC %Y')
-        echo "KBUILD_BUILD_TIMESTAMP=${KBUILD_TS}" >> $GITHUB_ENV
-        # Keep git metadata aligned with the same fixed timestamp.
-        GIT_DATE=$(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%dT%H:%M:%SZ')
-        echo "GIT_COMMITTER_DATE=${GIT_DATE}" >> $GITHUB_ENV
-        echo "GIT_AUTHOR_DATE=${GIT_DATE}" >> $GITHUB_ENV
-        echo "Build timestamp set to: $(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%d %H:%M:%S UTC') (epoch: $SOURCE_DATE_EPOCH)"
 
-    - name: Extract Sublevel and Set File Name
-      id: extract
-      uses: ./.github/actions/extract-sublevel-file-name
-      with:
-        android_version: ${{ inputs.android_version }}
-        kernel_version: ${{ inputs.kernel_version }}
-        sublevel: ${{ inputs.sublevel }}
-        os_patch_level: ${{ inputs.os_patch_level }}
-        variant: ${{ inputs.variant }}
-
-    # Build compatibility fixes only. These do not add kernel features.
-    - name: Kernel Build Compatibility Fixes
-      uses: ./.github/actions/kernel-fixes
-      with:
-        version: ${{ inputs.version }}
-        android_version: ${{ inputs.android_version }}
-        kernel_version: ${{ inputs.kernel_version }}
-        sublevel: ${{ steps.extract.outputs.sublevel }}
-        os_patch_level: ${{ inputs.os_patch_level }}
-
-    - name: Setup KernelSU-Next
-      uses: ./.github/actions/kernelsu
-      with:
-        ksu_branch: ${{ inputs.ksu_branch }}
-
-    - name: Setup SUSFS
-      uses: ./.github/actions/susfs
-      with:
-        susfs_commit: ${{ inputs.susfs_commit }}
-        version: ${{ inputs.version }}
-        android_version: ${{ inputs.android_version }}
-        kernel_version: ${{ inputs.kernel_version }}
-        os_patch_level: ${{ inputs.os_patch_level }}
-        sublevel: ${{ steps.extract.outputs.sublevel }}
-
-    - name: Clean Kernel Flags
-      uses: ./.github/actions/clean-kernel-flags
-
-    - name: Scan and collect patch rejects
-      id: scan
-      if: ${{ always() }}
-      uses: ./.github/actions/scan-patch-rejects
-        
-    - name: Upload Rejects
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ steps.extract.outputs.file_name }}-Rejects
-        path: patch-rejects/
-        if-no-files-found: ignore
-        compression-level: 9
-
-    - name: Get prebuilt ccache (downloaded once by prepare-ccache)
-      uses: actions/download-artifact@v8
-      with:
-        name: ccache-binary
-        path: ccache-dl
-      continue-on-error: true
-
-    - name: 'Setup Cache and Build Environment'
-      uses: ./.github/actions/cache-setup
-      with:
-        version: ${{ inputs.version }}
-        android_version: ${{ inputs.android_version }}
-        kernel_version: ${{ inputs.kernel_version }}
-        sublevel: ${{ steps.extract.outputs.sublevel }}
-
-    - name: Restore ccache
-      id: restore-ccache
-      continue-on-error: true
-      if: inputs.version == 'android12-5.10' || inputs.version == 'android13-5.10' || inputs.version == 'android13-5.15'
-      uses: ./.github/actions/cache-restore
-      with:
-        cache_path: /home/runner/.ccache
-        cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
-        cache_bucket: ccache-cache
-        restore_keys: |
-          ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-
-
-    - name: Restore lto-cache (ccache versions)
-      id: restore-lto-ccache
-      continue-on-error: true
-      if: inputs.version == 'android12-5.10' || inputs.version == 'android13-5.10' || inputs.version == 'android13-5.15'
-      uses: ./.github/actions/cache-restore
-      with:
-        cache_path: /home/runner/.ld_cache
-        cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
-        cache_bucket: lto-cache
-        restore_keys: |
-          ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-
-
-    - name: Restore bazel-cache
-      id: restore-bazel
-      continue-on-error: true
-      if: inputs.version == 'android14-5.15' || inputs.version == 'android14-6.1' || inputs.version == 'android15-6.6' || inputs.version == 'android16-6.12'
-      uses: ./.github/actions/cache-restore
-      with:
-        cache_path: /home/runner/.cache/bazel
-        cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
-        cache_bucket: bazel-cache
-        restore_keys: |
-          ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-
-
-    - name: Check cache hit
-      run: |
-        echo "Cache restore status:"
-        CCACHE_HIT="${{ steps.restore-ccache.outputs.cache-hit || 'skipped' }}"
-        LTO_CCACHE_HIT="${{ steps.restore-lto-ccache.outputs.cache-hit || 'skipped' }}"
-        BAZEL_HIT="${{ steps.restore-bazel.outputs.cache-hit || 'skipped' }}"
-        LTO_BAZEL_HIT="skipped"
-        echo "  ccache: $CCACHE_HIT"
-        echo "  lto (ccache versions): $LTO_CCACHE_HIT"
-        echo "  bazel: $BAZEL_HIT"
-        echo "  lto (bazel versions): $LTO_BAZEL_HIT"
-
-    - name: Get Cache Stats
-      uses: ./.github/actions/cache-stats
-      with:
-        clear_stats: true
-
-    - name: Initialize Config Fragment
-      run: touch "${{ github.workspace }}/wild_gki.fragment"
-
-    - name: Build Kernel
-      env:
-        SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
-        KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
-      uses: ./.github/actions/build-kernel
-      with:
-        version: ${{ inputs.version }}
-        bypass: false
-
-    - name: Get Cache Stats
-      uses: ./.github/actions/cache-stats
-      with:
-        clear_stats: false
-
-    - name: 📋 Consolidated Build Summary
-      if: ${{ always() }}
-      shell: bash
-      run: |
-        SUMMARY_FILE="/tmp/build-summary-${{ steps.extract.outputs.file_name }}.md"
-        
-        # Determine build status
-        if [ "${{ job.status }}" = "success" ]; then
-          STATUS="✅ Success"
-        else
-          STATUS="❌ Failed"
-        fi
-        
-        # Get kernel version from Image if available
-        KERNEL_VER_STR=""
-        if [ -f "/home/runner/out/dist/Image" ]; then
-          KERNEL_VER_STR=$(strings "/home/runner/out/dist/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
-        elif [ -f "/home/runner/out/Image" ]; then
-          KERNEL_VER_STR=$(strings "/home/runner/out/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
-        fi
-        
-        # Get KSU version from env (set by kernelsu action)
-        KSU_VER="${KSU_VERSION:-N/A}"
-        KSU_TAG="${KSU_GIT_TAG:-N/A}"
-        
-        # Get SUSFS version from susfs.h if available
-        SUSFS_VER="N/A"
-        if [ -f "${{ github.workspace }}/kernel/common/include/linux/susfs.h" ]; then
-          SUSFS_VER=$(grep '#define SUSFS_VERSION' "${{ github.workspace }}/kernel/common/include/linux/susfs.h" | awk -F'"' '{print $2}' || echo "N/A")
-        fi
-        
-        # Get cache stats from env (set by cache-stats action)
-        CCACHE_HIT="${CCACHE_HIT_RATE:-N/A}"
-        
-        # Get build time (approximate from step timing)
-        BUILD_TIME="N/A"
-        
-        # Count warnings from build log if available
-        WARNINGS="N/A"
-        
-        {
-          echo "## ${{ inputs.android_version }} ${{ inputs.kernel_version }}.${{ inputs.sublevel }} (${{ inputs.variant }}) — ${STATUS}"
-          echo
-          echo "| Metric | Value |"
-          echo "|--------|-------|"
-          echo "| **Status** | ${STATUS} |"
-          echo "| **Kernel** | ${{ inputs.kernel_version }}.${{ inputs.sublevel }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }} |"
-          if [ -n "$KERNEL_VER_STR" ]; then
-            echo "| **Version String** | \`${KERNEL_VER_STR}\` |"
+          if [ -z "$kernel_release" ] || [[ "$kernel_release" == *'%s'* ]]; then
+            echo "ERROR: invalid kernel release: '$kernel_release'" >&2
+            exit 1
           fi
-          echo "| **KSU Version** | ${KSU_VER} |"
-          echo "| **KSU Tag** | ${KSU_TAG} |"
-          echo "| **SUSFS Version** | ${SUSFS_VER} |"
-          echo "| **Feature Set** | ${{ inputs.feature_set }} |"
-          echo "| **Variant** | ${{ inputs.variant }} |"
-          echo
-          
-          # Kernel Fixes
-          if [ -f /tmp/kernel-fixes-summary.md ]; then
-            echo "### 🔧 Kernel Fixes"
-            cat /tmp/kernel-fixes-summary.md
+
+          if [[ "$kernel_release" != "${KERNEL_REAL}"* ]]; then
+            echo "ERROR: kernel release '$kernel_release' does not match '$KERNEL_REAL'." >&2
+            exit 1
+          fi
+
+          echo "KERNEL_RELEASE=$kernel_release" >> "$GITHUB_ENV"
+          echo "kernel_release=$kernel_release" >> "$GITHUB_OUTPUT"
+          echo "Compiled kernel release: $kernel_release"
+
+      - name: Create final ZenKernel ZIP
+        id: package
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+
+          susfs_file_version="${SUSFS_VERSION#v}"
+          zip_name="ZenKernel-${KERNEL_REAL}-android12-lts-KSUN${KSU_VERSION}-SUSFS${susfs_file_version}.zip"
+          zip_path="${GITHUB_WORKSPACE}/${zip_name}"
+
+          [ -f "AnyKernel3/Image" ] || {
+            echo "ERROR: AnyKernel3/Image was not generated." >&2
+            exit 1
+          }
+
+          if find AnyKernel3 -type f \( -name '*.img' -o -name '*.zip' -o -name '*.rej' \) -print -quit | grep -q .; then
+            echo "ERROR: forbidden file found in AnyKernel3 package." >&2
+            find AnyKernel3 -type f \( -name '*.img' -o -name '*.zip' -o -name '*.rej' \) -print >&2
+            exit 1
+          fi
+
+          rm -rf AnyKernel3/.git AnyKernel3/.github
+          rm -f "$zip_path"
+          (
+            cd AnyKernel3
+            zip -r -q -9 "$zip_path" .
+          )
+
+          zip_sha256="$(sha256sum "$zip_path" | awk '{print $1}')"
+          artifact_name="${zip_name%.zip}"
+
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+          echo "ZIP_SHA256=$zip_sha256" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME=$artifact_name" >> "$GITHUB_ENV"
+          echo "zip_name=$zip_name" >> "$GITHUB_OUTPUT"
+          echo "zip_sha256=$zip_sha256" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+          echo "Final ZIP: $zip_name"
+          echo "SHA-256: $zip_sha256"
+
+      - name: Collect build metadata
+        id: metadata
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          output() {
+            local key="$1"
+            local value="$2"
+            echo "$key=$value" >> "$GITHUB_OUTPUT"
+          }
+
+          output kernel_real "${KERNEL_REAL:-}"
+          output kernel_release "${KERNEL_RELEASE:-}"
+          output ksu_version "${KSU_VERSION:-}"
+          output ksu_tag "${KSU_GIT_TAG:-}"
+          output ksu_commit "${KSUN_COMMIT:-}"
+          output susfs_version "${SUSFS_VERSION:-}"
+          output android_common_commit "${ANDROID_COMMON_COMMIT:-}"
+          output anykernel_commit "${ANYKERNEL_COMMIT:-}"
+          output zip_name "${ZIP_NAME:-}"
+          output zip_sha256 "${ZIP_SHA256:-}"
+          output artifact_name "${ARTIFACT_NAME:-}"
+          output rej_count "${REJ_COUNT:-0}"
+
+          if [ "${{ job.status }}" = "success" ]; then
+            status="✅ Success"
+          else
+            status="❌ Failed"
+          fi
+
+          {
+            echo "## Android 12 GKI ${KERNEL_REAL:-5.10.x} (Normal) — $status"
             echo
-          fi
-        } > "$SUMMARY_FILE"
+            echo "| Metric | Value |"
+            echo "| --- | --- |"
+            echo "| Status | $status |"
+            echo "| Kernel Version | ${KERNEL_REAL:-N/A} |"
+            echo "| Kernel Release | \`${KERNEL_RELEASE:-N/A}\` |"
+            echo "| KernelSU Version | ${KSU_VERSION:-N/A} |"
+            echo "| KernelSU Tag | ${KSU_GIT_TAG:-N/A} |"
+            echo "| KernelSU Commit | \`${KSUN_COMMIT:-N/A}\` |"
+            echo "| SUSFS Version | ${SUSFS_VERSION:-N/A} |"
+            echo "| Feature Set | KSUN+SUSFS |"
+            echo "| Variant | Normal |"
+            echo "| Android Common Kernel Commit | \`${ANDROID_COMMON_COMMIT:-N/A}\` |"
+            echo "| AnyKernel Commit | \`${ANYKERNEL_COMMIT:-N/A}\` |"
+            echo "| ZIP | \`${ZIP_NAME:-N/A}\` |"
+            echo "| SHA-256 | \`${ZIP_SHA256:-N/A}\` |"
+            echo "| .rej Files | ${REJ_COUNT:-0} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Upload Build Summary Artifact
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ steps.extract.outputs.file_name }}-Summary
-        path: /tmp/build-summary-${{ steps.extract.outputs.file_name }}.md
-        if-no-files-found: ignore
-        compression-level: 9
-
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ steps.extract.outputs.file_name }}-AnyKernel3
-        path: ${{ github.workspace }}/AnyKernel3/**
-        if-no-files-found: ignore
-        compression-level: 9
-        
+      - name: Upload final ZIP
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ github.workspace }}/${{ steps.package.outputs.zip_name }}
+          if-no-files-found: error
+          compression-level: 0

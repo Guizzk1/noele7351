@@ -2,7 +2,6 @@
   "version": "android12-5.10",
   "include": [
     {
-      "sublevel": "258",
       "date": "lts"
     }
   ]

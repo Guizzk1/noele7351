@@ -1,4 +1,4 @@
-name: Prepare and Build
+name: Prepare and Build ZenKernel
 
 on:
   workflow_call:
@@ -9,74 +9,76 @@ on:
         type: string
       feature_set:
         description: "Feature Set"
-        required: false
+        required: true
         type: string
-      ksu_branch:
-        description: "KernelSU branch or commit (empty = latest dev)"
-        required: false
-        type: string
-        default: ""
       susfs_commit:
-        description: "SUSFS commit hash (empty = latest on auto-derived branch)"
+        description: "SUSFS commit hash (empty = latest branch HEAD)"
         required: false
         type: string
         default: ""
+    outputs:
+      kernel_real:
+        value: ${{ jobs.build.outputs.kernel_real }}
+      kernel_release:
+        value: ${{ jobs.build.outputs.kernel_release }}
+      ksu_version:
+        value: ${{ jobs.build.outputs.ksu_version }}
+      ksu_tag:
+        value: ${{ jobs.build.outputs.ksu_tag }}
+      ksu_commit:
+        value: ${{ jobs.build.outputs.ksu_commit }}
+      susfs_version:
+        value: ${{ jobs.build.outputs.susfs_version }}
+      android_common_commit:
+        value: ${{ jobs.build.outputs.android_common_commit }}
+      anykernel_commit:
+        value: ${{ jobs.build.outputs.anykernel_commit }}
+      zip_name:
+        value: ${{ jobs.build.outputs.zip_name }}
+      zip_sha256:
+        value: ${{ jobs.build.outputs.zip_sha256 }}
+      artifact_name:
+        value: ${{ jobs.build.outputs.artifact_name }}
+      rej_count:
+        value: ${{ jobs.build.outputs.rej_count }}
 
 jobs:
   generate-matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.final.outputs.matrix }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Read Config and Build Final Matrix
-        id: final
+      - name: Read build configuration
+        id: matrix
         shell: bash
         run: |
-          if [ ! -f "${{ inputs.config_file }}" ]; then
-            echo "Error: Config file not found: ${{ inputs.config_file }}"
+          set -euo pipefail
+          config_file="${{ inputs.config_file }}"
+          [ -f "$config_file" ] || {
+            echo "ERROR: config file not found: $config_file" >&2
             exit 1
-          fi
+          }
 
-          CONFIG_JSON=$(cat "${{ inputs.config_file }}" | jq -c .)
-
-          # Build { "include": [ {android_version:..., kernel_version:..., sublevel:..., os_patch_level:..., variant: ...}, ... ] }
-          # Always include Normal, and add any explicit per-item variant from the config.
-          FINAL=$(jq -cn \
-            --argjson cfg "$CONFIG_JSON" '
-            ($cfg.version | split("-")) as $version_parts
+          matrix="$(jq -c '
+            (.version | split("-")) as $parts
             | {
-              include: (
-                [
-                  $cfg.include[] as $item
+                include: [
+                  .include[]
                   | {
-                      version: $cfg.version,
-                      android_version: $version_parts[0],
-                      kernel_version: $version_parts[1],
-                      sublevel: $item.sublevel,
-                      os_patch_level: $item.date,
+                      version: $parts | join("-"),
+                      android_version: $parts[0],
+                      kernel_version: $parts[1],
+                      os_patch_level: .date,
                       variant: "Normal"
                     }
                 ]
-                + [
-                  $cfg.include[] as $item
-                  | select($item.variant != null)
-                  | {
-                      version: $cfg.version,
-                      android_version: $version_parts[0],
-                      kernel_version: $version_parts[1],
-                      sublevel: $item.sublevel,
-                      os_patch_level: $item.date,
-                      variant: $item.variant
-                    }
-                ]
-                | unique_by([.android_version, .kernel_version, .sublevel, .os_patch_level, .variant])
-              )
-            }')
+              }
+          ' "$config_file")"
 
-          echo "matrix=$FINAL" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build:
     needs: generate-matrix
@@ -88,10 +90,8 @@ jobs:
       version: ${{ matrix.version }}
       android_version: ${{ matrix.android_version }}
       kernel_version: ${{ matrix.kernel_version }}
-      sublevel: ${{ matrix.sublevel }}
       os_patch_level: ${{ matrix.os_patch_level }}
-      variant: ${{ matrix.variant }}
-      feature_set: ${{ inputs.feature_set }}
-      ksu_branch: ${{ inputs.ksu_branch }}
+      variant: Normal
+      feature_set: KSUN+SUSFS
       susfs_commit: ${{ inputs.susfs_commit }}
     secrets: inherit

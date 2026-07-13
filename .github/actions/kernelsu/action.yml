@@ -1,103 +1,79 @@
-name: Setup KernelSU-Next Latest
-description: Download and configure the latest KernelSU-Next dev-susfs branch with accurate version tracking
-
-inputs:
-  ksu_branch:
-    description: 'Kept for workflow compatibility. The latest dev-susfs branch is always used.'
-    required: false
-    default: ""
+name: Setup Latest KernelSU Next
+description: Clone and configure the latest pershoot/KernelSU-Next dev-susfs HEAD
 
 runs:
   using: composite
   steps:
-    - name: Download latest KernelSU-Next
+    - name: Clone latest dev-susfs checkout
       shell: bash
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
 
-        KSU_REPO="https://github.com/pershoot/KernelSU-Next.git"
-        KSU_BRANCH="dev-susfs"
-        REQUESTED_REF="${{ inputs.ksu_branch }}"
+        ksu_repo="https://github.com/pershoot/KernelSU-Next.git"
+        ksu_branch="dev-susfs"
+        checkout_dir="KernelSU-Next"
 
-        if [[ -n "$REQUESTED_REF" && "$REQUESTED_REF" != "$KSU_BRANCH" ]]; then
-          echo "::warning::Ignoring requested KernelSU ref '$REQUESTED_REF'. This workflow always compiles the latest '$KSU_BRANCH' revision."
-        fi
+        remote_sha="$(git ls-remote "$ksu_repo" "refs/heads/$ksu_branch" | awk 'NR == 1 {print $1}')"
+        [ -n "$remote_sha" ] || {
+          echo "ERROR: unable to resolve $ksu_repo branch $ksu_branch" >&2
+          exit 1
+        }
 
-        REMOTE_SHA="$(git ls-remote "$KSU_REPO" "refs/heads/$KSU_BRANCH" | awk 'NR == 1 {print $1}')"
-        if [[ -z "$REMOTE_SHA" ]]; then
-          echo "ERROR: Could not resolve the latest KernelSU-Next $KSU_BRANCH commit." >&2
+        # A cached or previous checkout must never pin KernelSU Next.
+        rm -rf "$checkout_dir"
+        rm -f drivers/kernelsu
+
+        git clone \
+          --branch "$ksu_branch" \
+          --single-branch \
+          "$ksu_repo" \
+          "$checkout_dir"
+
+        git -C "$checkout_dir" fetch --force --prune --tags origin \
+          "+refs/heads/$ksu_branch:refs/remotes/origin/$ksu_branch"
+        git -C "$checkout_dir" remote set-head origin "$ksu_branch"
+        git -C "$checkout_dir" checkout --force --detach "origin/$ksu_branch"
+
+        actual_sha="$(git -C "$checkout_dir" rev-parse HEAD)"
+        if [ "$actual_sha" != "$remote_sha" ]; then
+          echo "ERROR: KernelSU Next checkout is not the latest remote HEAD." >&2
+          echo "Remote: $remote_sha" >&2
+          echo "Local:  $actual_sha" >&2
           exit 1
         fi
 
-        # Start clean so a previous or cached checkout can never pin an old revision.
-        rm -rf KernelSU-Next
+        commits_count="$(git -C "$checkout_dir" rev-list --count HEAD)"
+        ksu_version="$((30000 + commits_count))"
+        ksu_tag="$(git -C "$checkout_dir" describe --tags --abbrev=0 HEAD 2>/dev/null || echo no-tag)"
 
-        curl --fail --location --silent --show-error \
-          "https://raw.githubusercontent.com/pershoot/KernelSU-Next/${KSU_BRANCH}/kernel/setup.sh" \
-          | bash -s "$KSU_BRANCH"
+        ln -s "../KernelSU-Next/kernel" drivers/kernelsu
+        grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+        grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+          sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
-        # Fetch the complete current branch. Full history is required because
-        # KernelSU-Next derives its numeric version from the commit count.
-        if [[ -f KernelSU-Next/.git/shallow ]]; then
-          git -C KernelSU-Next fetch --force --prune --tags --unshallow origin
-        else
-          git -C KernelSU-Next fetch --force --prune --tags origin
-        fi
+        echo "KSUN_BRANCH=$ksu_branch" >> "$GITHUB_ENV"
+        echo "KSUN_COMMIT=$actual_sha" >> "$GITHUB_ENV"
+        echo "KSU_VERSION=$ksu_version" >> "$GITHUB_ENV"
+        echo "KSU_GIT_TAG=$ksu_tag" >> "$GITHUB_ENV"
 
-        git -C KernelSU-Next fetch --force origin \
-          "+refs/heads/${KSU_BRANCH}:refs/remotes/origin/${KSU_BRANCH}"
+        echo "KernelSU Next repository: $ksu_repo"
+        echo "KernelSU Next branch:     $ksu_branch"
+        echo "KernelSU Next commit:     $actual_sha"
+        echo "KernelSU Next version:    $ksu_version"
+        echo "KernelSU Next tag:        $ksu_tag"
 
-        # Kbuild checks origin/HEAD while the source is on a detached HEAD.
-        # Point it to dev-susfs so the compiled version uses this exact branch.
-        git -C KernelSU-Next remote set-head origin "$KSU_BRANCH"
-        git -C KernelSU-Next checkout --force --detach "origin/$KSU_BRANCH"
-
-        ACTUAL_SHA="$(git -C KernelSU-Next rev-parse HEAD)"
-        if [[ "$ACTUAL_SHA" != "$REMOTE_SHA" ]]; then
-          echo "ERROR: KernelSU-Next checkout is not at the latest remote commit." >&2
-          echo "Expected: $REMOTE_SHA" >&2
-          echo "Actual:   $ACTUAL_SHA" >&2
-          exit 1
-        fi
-
-        COMMITS_COUNT="$(git -C KernelSU-Next rev-list --count HEAD)"
-        KSU_VERSION="$((30000 + COMMITS_COUNT))"
-        KSU_GIT_TAG="$(git -C KernelSU-Next describe --tags --abbrev=0 HEAD 2>/dev/null || echo 'no-tag')"
-        KSU_COMMIT="$(git -C KernelSU-Next rev-parse --short=12 HEAD)"
-
-        # These values are fallbacks only. With the Git checkout present,
-        # KernelSU-Next Kbuild calculates the same version from HEAD.
-        sed -i -E \
-          "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := ${KSU_VERSION}/" \
-          KernelSU-Next/kernel/Kbuild
-        sed -i -E \
-          "s/^KSU_VERSION_TAG_FALLBACK := .*/KSU_VERSION_TAG_FALLBACK := ${KSU_GIT_TAG}/" \
-          KernelSU-Next/kernel/Kbuild
-
-        echo "KSUN_BRANCH=$KSU_BRANCH" >> "$GITHUB_ENV"
-        echo "KSUN_COMMIT=$ACTUAL_SHA" >> "$GITHUB_ENV"
-        echo "KSU_COMMIT=$KSU_COMMIT" >> "$GITHUB_ENV"
-        echo "KSU_COMMITS_COUNT=$COMMITS_COUNT" >> "$GITHUB_ENV"
-        echo "KSU_VERSION=$KSU_VERSION" >> "$GITHUB_ENV"
-        echo "KSU_GIT_TAG=$KSU_GIT_TAG" >> "$GITHUB_ENV"
-
-        echo "KernelSU-Next branch:  $KSU_BRANCH"
-        echo "KernelSU-Next commit:  $ACTUAL_SHA"
-        echo "KernelSU-Next version: $KSU_VERSION"
-        echo "KernelSU-Next tag:     $KSU_GIT_TAG"
-
-    - name: Fix KernelSU-Next
+    - name: Apply KernelSU Next compatibility fix
       shell: bash
       working-directory: ${{ github.workspace }}/kernel/common/KernelSU-Next
       run: |
         set -euo pipefail
-        cp "${{ github.action_path }}/patches/static.patch" static.patch
-        patch -p1 < static.patch
+        patch_file="${{ github.action_path }}/patches/static.patch"
+        patch --batch --forward -p1 < "$patch_file"
 
-    - name: Enable KernelSU config
+    - name: Enable KernelSU Next
       uses: ./.github/actions/set-kernel-config
       with:
         config_list: |
           CONFIG_KSU=y
-          

@@ -4,7 +4,6 @@ inputs:
   clear_stats:
     description: 'Whether to clear ccache stats after displaying (default: true)'
     required: true
-    type: boolean
     default: true
 
 runs:
@@ -138,7 +137,7 @@ runs:
         echo "=== .cache/bazel ==="
         echo "===================="
         summarize_dir /home/runner/.cache/bazel 10 5 || true
-        
+
     - name: Show ld cache folder Stats
       shell: bash
       working-directory: ${{ github.workspace }}
@@ -150,4 +149,3 @@ runs:
         echo "=== .ld_cache ==="
         echo "================="
         summarize_dir /home/runner/.ld_cache 10 5 || true
-        

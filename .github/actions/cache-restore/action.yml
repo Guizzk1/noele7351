@@ -5,15 +5,12 @@ inputs:
   cache_path:
     description: 'Path where cache should be restored'
     required: true
-    type: string
   cache_key:
     description: 'Primary key to restore cache'
     required: true
-    type: string
   restore_keys:
     description: 'Multiline list of keys (fallback prefixes)'
     required: false
-    type: string
     default: ""
   cache_bucket:
     description: 'The tag name for the release (e.g., general-cache)'
@@ -22,12 +19,10 @@ inputs:
   compression_level:
     description: 'Compression level (0-9). Kept for compatibility with save actions.'
     required: false
-    type: number
     default: 6
   debug:
     description: 'Enable debug logging'
     required: false
-    type: boolean
     default: false
 
 outputs:
