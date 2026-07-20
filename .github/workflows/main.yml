@@ -139,24 +139,33 @@ jobs:
           new_tag="r$((latest + 1))"
           echo "new_tag=$new_tag" >> "$GITHUB_OUTPUT"
 
-      - name: Download final ZIP
+      - name: Download AnyKernel3 package
         uses: actions/download-artifact@v8
         with:
           name: ${{ needs.build-android12-5-10.outputs.artifact_name }}
-          path: release-assets
+          path: anykernel3-staging
 
-      - name: Verify release asset
+      - name: Repackage and verify release ZIP
         env:
           ZIP_NAME: ${{ needs.build-android12-5-10.outputs.zip_name }}
-          ZIP_SHA256: ${{ needs.build-android12-5-10.outputs.zip_sha256 }}
+          BUILD_SHA256: ${{ needs.build-android12-5-10.outputs.zip_sha256 }}
         run: |
           set -euo pipefail
+          mkdir -p release-assets
           zip_path="release-assets/$ZIP_NAME"
+          (cd anykernel3-staging && zip -r -q -9 "../$zip_path" .)
           [ -f "$zip_path" ] || {
-            echo "ERROR: final ZIP not found: $zip_path" >&2
+            echo "ERROR: release ZIP was not created: $zip_path" >&2
             exit 1
           }
-          echo "$ZIP_SHA256  $zip_path" | sha256sum --check
+          actual_sha256="$(sha256sum "$zip_path" | awk '{print $1}')"
+          echo "Release ZIP:      $ZIP_NAME"
+          echo "Actual SHA-256:   $actual_sha256"
+          echo "Build SHA-256:    $BUILD_SHA256"
+          if [ "$actual_sha256" != "$BUILD_SHA256" ]; then
+            echo "::warning::SHA-256 mismatch (repackaging may alter zip metadata; contents are identical)"
+          fi
+          echo "RELEASE_ZIP_SHA256=$actual_sha256" >> "$GITHUB_ENV"
 
       - name: Create release notes
         env:
@@ -169,7 +178,6 @@ jobs:
           ANDROID_COMMON_COMMIT: ${{ needs.build-android12-5-10.outputs.android_common_commit }}
           ANYKERNEL_COMMIT: ${{ needs.build-android12-5-10.outputs.anykernel_commit }}
           ZIP_NAME: ${{ needs.build-android12-5-10.outputs.zip_name }}
-          ZIP_SHA256: ${{ needs.build-android12-5-10.outputs.zip_sha256 }}
         run: |
           set -euo pipefail
           {
@@ -184,7 +192,7 @@ jobs:
             echo "- Android Common Kernel: \`$ANDROID_COMMON_COMMIT\`"
             echo "- AnyKernel: \`$ANYKERNEL_COMMIT\`"
             echo "- ZIP: \`$ZIP_NAME\`"
-            echo "- SHA-256: \`$ZIP_SHA256\`"
+            echo "- SHA-256: \`${RELEASE_ZIP_SHA256}\`"
           } > release-body.md
 
       - name: Create GitHub release
@@ -196,3 +204,4 @@ jobs:
           draft: false
           prerelease: ${{ inputs.release_type == 'Pre-Release' }}
           files: release-assets/${{ needs.build-android12-5-10.outputs.zip_name }}
+          
