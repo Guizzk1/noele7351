@@ -45,3 +45,30 @@ runs:
         echo "AnyKernel repository: $anykernel_repo"
         echo "AnyKernel branch:     $anykernel_branch"
         echo "AnyKernel commit:     $anykernel_commit"
+
+    - name: Patch AnyKernel3 for GKI compatibility
+      shell: bash
+      run: |
+        set -euo pipefail
+        anykernel_sh="${{ github.workspace }}/AnyKernel3/anykernel.sh"
+
+        if [ ! -f "$anykernel_sh" ]; then
+          echo "WARNING: anykernel.sh not found, skipping GKI patch."
+          exit 0
+        fi
+
+        # The ak3-core.sh do_check_boot_version() reads "do.check_boot_version"
+        # from anykernel.sh via file_getprop.  When the value is not 1 the check
+        # is skipped (the core already has the skip path built in).
+        # On GKI devices the boot partition version cannot be extracted from the
+        # stock compressed image, causing the version check to abort.
+        if grep -qE 'do\.check_boot_version=[1-9]' "$anykernel_sh"; then
+          sed -i -E 's/do\.check_boot_version=[1-9]/do.check_boot_version=0/' "$anykernel_sh"
+          echo "✓ Patched anykernel.sh: do.check_boot_version → 0 (GKI)"
+        else
+          echo "ℹ do.check_boot_version already 0 or not found — no patch needed."
+        fi
+
+        echo "--- properties block ---"
+        sed -n "/^properties/,/^'/p" "$anykernel_sh"
+  
