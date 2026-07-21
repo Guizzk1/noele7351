@@ -339,11 +339,15 @@ jobs:
             echo "| .rej Files | ${REJ_COUNT:-0} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload final ZIP
+      - name: Upload AnyKernel3 package
         if: ${{ success() }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.package.outputs.artifact_name }}
-          path: ${{ github.workspace }}/${{ steps.package.outputs.zip_name }}
+          # Upload the directory contents directly so that the artifact
+          # downloaded from the Actions UI IS the flashable AnyKernel zip,
+          # with no extra outer zip wrapper around it.
+          path: ${{ github.workspace }}/AnyKernel3/
           if-no-files-found: error
-          compression-level: 0
+          compression-level: 9
+        
